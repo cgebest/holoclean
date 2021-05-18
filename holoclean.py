@@ -7,20 +7,17 @@ import torch
 import numpy as np
 import pandas as pd
 
-from dataset import Dataset, Table, Source, AuxTables
-from dcparser import Parser
-from domain import DomainEngine
-from detect import DetectEngine
-from repair import RepairEngine
-from evaluate import EvalEngine
-from dataset.quantization import quantize_km
-from utils import NULL_REPR
+from holoclean.dataset import Dataset, Table, Source, AuxTables
+from holoclean.dcparser import Parser
+from holoclean.domain import DomainEngine
+from holoclean.detect import DetectEngine
+from holoclean.repair import RepairEngine
+from holoclean.evaluate import EvalEngine
+from holoclean.dataset.quantization import quantize_km
+from .utils import NULL_REPR
 
 
-logging.basicConfig(format="%(asctime)s - [%(levelname)5s] - %(message)s", datefmt='%H:%M:%S')
-root_logger = logging.getLogger()
 gensim_logger = logging.getLogger('gensim')
-root_logger.setLevel(logging.INFO)
 gensim_logger.setLevel(logging.WARNING)
 
 
@@ -29,13 +26,13 @@ arguments = [
     (('-u', '--db_user'),
         {'metavar': 'DB_USER',
          'dest': 'db_user',
-         'default': 'holocleanuser',
+         'default': 'kamino',
          'type': str,
          'help': 'User for DB used to persist state.'}),
     (('-p', '--db-pwd', '--pass'),
         {'metavar': 'DB_PWD',
          'dest': 'db_pwd',
-         'default': 'abcd1234',
+         'default': 'kamino',
          'type': str,
          'help': 'Password for DB used to persist state.'}),
     (('-h', '--db-host'),
@@ -47,7 +44,7 @@ arguments = [
     (('-d', '--db_name'),
         {'metavar': 'DB_NAME',
          'dest': 'db_name',
-         'default': 'holo',
+         'default': 'db4kamino',
          'type': str,
          'help': 'Name of DB used to persist state.'}),
     (('-t', '--threads'),
@@ -194,6 +191,12 @@ arguments = [
       'default': 'dk',
       'type': str,
       'help': 'Infer on only possibly erroneous (DK) cells or all cells. One of {dk, all}.'}),
+    (('-dp', '--privacy'),
+         {'metavar': 'PRIVACY',
+          'dest': 'privacy',
+          'default': False,
+          'type': bool,
+          'help': 'Synthetic data under differential privacy.'}),
 ]
 
 # Flags for Holoclean mode
@@ -390,8 +393,6 @@ class Session:
         for attr in self.ds.quantized_data.get_attributes():
             self.ds.quantized_data.create_db_index(self.ds.engine, [attr])
         logging.debug('Time to load quantized dataset: %.2f secs' % (time.time() - tic))
-
-
 
     def generate_domain(self):
         status, domain_time = self.domain_engine.setup()

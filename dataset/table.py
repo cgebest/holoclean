@@ -90,6 +90,6 @@ class Table:
         self.df.set_index(attr_list, inplace=True)
 
     def create_db_index(self, db_engine, attr_list):
-        index_name = '{name}_{idx}'.format(name=self.name, idx=self.index_count)
+        index_name = '"{name}_{idx}"'.format(name=self.name, idx=self.index_count)
         db_engine.create_db_index(index_name, self.name, attr_list)
         self.index_count += 1

@@ -4,14 +4,13 @@ import logging
 import pandas as pd
 import time
 
-import itertools
 import numpy as np
 from tqdm import tqdm
 
-from dataset import AuxTables, CellStatus
+from holoclean.dataset import AuxTables, CellStatus
 from .estimators import *
 from .correlations import compute_norm_cond_entropy_corr
-from utils import NULL_REPR
+from holoclean.utils import NULL_REPR
 
 
 class DomainEngine:
@@ -247,6 +246,7 @@ class DomainEngine:
                               "is_dk": (tid, attr) in dk_lookup,
                               })
                 vid += 1
+        logging.debug('length of cells: %s', len(cells))
         domain_df = pd.DataFrame(data=cells).sort_values('_vid_')
         logging.debug('domain size stats: %s', domain_df['domain_size'].describe())
         logging.debug('domain count by attr: %s', domain_df['attribute'].value_counts())
@@ -343,7 +343,9 @@ class DomainEngine:
             additional_values = np.random.choice(domain_pool, size=k, replace=False)
         else:
             additional_values = []
-        return sorted(additional_values)
+        # return sorted(additional_values)
+        ## use the full domain
+        return sorted(domain_pool)
 
     def generate_domain_embedding(self, domain_attrs):
         """

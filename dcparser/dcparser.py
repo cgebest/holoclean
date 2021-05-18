@@ -20,18 +20,19 @@ class Parser:
         self.dc_strings = []
         self.dcs = []
 
-    def load_denial_constraints(self, fpath):
+    def load_denial_constraints(self, fpath, check=True, attrs=[]):
         """
         Loads denial constraints from line-separated TXT file
         
         :param fpath: filepath to TXT file containing denial constraints
         """
         tic = time.clock()
-        if not self.ds.raw_data:
-            status = 'No dataset specified'
-            toc = time.clock()
-            return status, toc - tic
-        attrs = self.ds.raw_data.get_attributes()
+        if check:
+            if not self.ds.raw_data:
+                status = 'No dataset specified'
+                toc = time.clock()
+                return status, toc - tic
+            attrs = self.ds.raw_data.get_attributes()
         try:
             dc_file = open(fpath, 'r')
             status = "OPENED constraints file successfully"

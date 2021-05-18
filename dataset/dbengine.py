@@ -26,7 +26,7 @@ class DBengine:
         con = 'dbname={} user={} password={} host={} port={}'
         con = con.format(db, user, pwd, host, port)
         self.conn_args = con
-        self.engine = sql.create_engine(url, client_encoding='utf8', pool_size=pool_size)
+        self.engine = sql.create_engine(url, pool_pre_ping=True, client_encoding='utf8', pool_size=pool_size)
 
     def execute_queries(self, queries):
         """
@@ -69,6 +69,19 @@ class DBengine:
         toc = time.clock()
         logging.debug('Time to execute query: %.2f secs', toc-tic)
         return result
+
+    def execute_query_no_return(self, query):
+        """
+        Executes a single :param query: using current connection.
+
+        :param query: (str) SQL query to be executed
+        """
+        tic = time.clock()
+        conn = self.engine.connect()
+        conn.execute(query)
+        conn.close()
+        toc = time.clock()
+        logging.debug('Time to execute query: %.2f secs', toc-tic)
 
     def create_db_table_from_query(self, name, query):
         tic = time.clock()

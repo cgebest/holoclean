@@ -2,8 +2,6 @@ import logging
 import math
 import os
 import pickle
-import sys
-
 import pandas as pd
 import numpy as np
 import torch
@@ -14,11 +12,14 @@ from torch.nn import CrossEntropyLoss, Softmax, MSELoss, ReLU
 import torch.nn.functional as F
 from tqdm import tqdm
 
-from dataset import AuxTables
+from holoclean.dataset import AuxTables
 from ..estimator import Estimator
-from utils import NULL_REPR
+from holoclean.utils import NULL_REPR
+
+from pyvacy.pyvacy import optim
 
 NONNUMERICS = "[^0-9+-.e]"
+
 
 def verify_numerical_attr_groups(dataset, numerical_attr_groups):
     """
@@ -33,13 +34,13 @@ def verify_numerical_attr_groups(dataset, numerical_attr_groups):
 
         if not all(attr in dataset.get_attributes() for attr in numerical_attrs):
             logging.error('all numerical attributes specified %s must exist in dataset: %s',
-                    numerical_attr_groups,
-                    dataset.get_attributes())
+                          numerical_attr_groups,
+                          dataset.get_attributes())
             raise Exception()
 
         if len(set(numerical_attrs)) < len(numerical_attrs):
             logging.error('all attribute groups specified %s must be disjoint in dataset',
-                    numerical_attr_groups)
+                          numerical_attr_groups)
             raise Exception()
 
     return numerical_attrs
@@ -76,7 +77,7 @@ class LookupDataset(Dataset):
                 self._isset[idx] = 1
 
     def __init__(self, env, dataset, domain_df,
-            numerical_attr_groups, neg_sample, memoize):
+                 numerical_attr_groups, neg_sample, memoize):
         """
         :param dataset: (Dataset) original dataset
         :param domain_df: (DataFrame) dataframe containing VIDs and their
@@ -103,7 +104,7 @@ class LookupDataset(Dataset):
         # attributes.
         self._all_attrs = sorted(self.ds.get_attributes())
         self._numerical_attrs = verify_numerical_attr_groups(self.ds,
-                numerical_attr_groups) or []
+                                                             numerical_attr_groups) or []
         self._numerical_attr_groups = numerical_attr_groups
 
         # Attributes to derive context from
@@ -112,11 +113,11 @@ class LookupDataset(Dataset):
         self._n_init_attrs = len(self._all_attrs)
 
         logging.debug('%s: init categorical attributes: %s',
-                type(self).__name__,
-                self._init_cat_attrs)
+                      type(self).__name__,
+                      self._init_cat_attrs)
         logging.debug('%s: init numerical attributes: %s',
-                type(self).__name__,
-                self._init_num_attrs)
+                      type(self).__name__,
+                      self._init_num_attrs)
 
         # Attributes to train on (i.e. target columns).
         self._train_attrs = sorted(domain_df['attribute'].unique())
@@ -124,11 +125,11 @@ class LookupDataset(Dataset):
         self._train_cat_attrs, self._train_num_attrs = self._split_cat_num_attrs(self._train_attrs)
         self._n_train_cat_attrs, self._n_train_num_attrs = len(self._train_cat_attrs), len(self._train_num_attrs)
         logging.debug('%s: train categorical attributes: %s',
-                type(self).__name__,
-                self._train_cat_attrs)
+                      type(self).__name__,
+                      self._train_cat_attrs)
         logging.debug('%s: train numerical attributes: %s',
-                type(self).__name__,
-                self._train_num_attrs)
+                      type(self).__name__,
+                      self._train_num_attrs)
 
         # Make copy of raw data
         # Quantized data is used for co-occurrence statistics in the last layer
@@ -150,8 +151,8 @@ class LookupDataset(Dataset):
             self._num_attrs_mean[num_attr] = temp[fil_notnull].astype(np.float).mean(axis=0)
             self._num_attrs_std[num_attr] = temp[fil_notnull].astype(np.float).std(axis=0)
             temp[fil_notnull] = ((temp[fil_notnull].astype(np.float) \
-                    - self._num_attrs_mean[num_attr]) \
-                    / (self._num_attrs_std[num_attr] or 1.)).astype(str)
+                                  - self._num_attrs_mean[num_attr]) \
+                                 / (self._num_attrs_std[num_attr] or 1.)).astype(str)
             self._raw_data[num_attr] = temp
 
         # This MUST go after the mean-0 variance 1 normalization above since
@@ -217,15 +218,15 @@ class LookupDataset(Dataset):
             cur_train_idx += 1
 
         # Unique train values (their indexes) by attr
-        self._train_val_idxs_by_attr = {attr: torch.LongTensor([v for v in self._train_val_idxs[attr].values() if v != 0])
-                for attr in self._train_cat_attrs}
-
+        self._train_val_idxs_by_attr = {
+            attr: torch.LongTensor([v for v in self._train_val_idxs[attr].values() if v != 0])
+            for attr in self._train_cat_attrs}
 
         # Maps each numerical attribute to a copy of its group (of other
         # numerical attributes).
         self._train_num_attrs_group = {attr: group.copy() for group in
-                self._numerical_attr_groups for attr in group
-                if attr in self._train_num_attrs}
+                                       self._numerical_attr_groups for attr in group
+                                       if attr in self._train_num_attrs}
 
         # Number of unique INIT attr-values
         self.n_init_vals = cur_init_idx
@@ -256,7 +257,7 @@ class LookupDataset(Dataset):
         self._dummy_domain_idxs = torch.zeros(self.max_cat_domain,
                                               dtype=torch.long)
         self._dummy_domain_cooccur = torch.zeros(self.max_cat_domain, self._n_init_attrs,
-                                              dtype=torch.float)
+                                                 dtype=torch.float)
         self._dummy_target_numvals = torch.zeros(self._max_num_dim,
                                                  dtype=torch.float)
         self._dummy_cat_target = torch.LongTensor([-1])
@@ -292,8 +293,8 @@ class LookupDataset(Dataset):
 
             # Value indices that are not in the domain
             neg_idxs = torch.LongTensor(np.setdiff1d(self._train_val_idxs_by_attr[cur['attribute']],
-                    self._get_domain_idxs(idx),
-                    assume_unique=True))
+                                                     self._get_domain_idxs(idx),
+                                                     assume_unique=True))
             if not self.memoize:
                 return neg_idxs
             self._neg_idxs[idx] = neg_idxs
@@ -311,11 +312,11 @@ class LookupDataset(Dataset):
             domain_idxs = torch.zeros(self.max_cat_domain, dtype=torch.long)
 
             domain_idxs[:cur['domain_size']] = torch.LongTensor([self._train_val_idxs[cur['attribute']][val]
-                    for val in cur['domain']])
+                                                                 for val in cur['domain']])
 
             if not self.memoize:
                 return domain_idxs
-            self._domain_idxs[idx,0:len(domain_idxs)] = domain_idxs
+            self._domain_idxs[idx, 0:len(domain_idxs)] = domain_idxs
 
         return self._domain_idxs[idx]
 
@@ -329,8 +330,8 @@ class LookupDataset(Dataset):
         cur = self._train_records[idx]
 
         cooccur_probs = torch.zeros(self.max_cat_domain,
-                self._n_init_attrs,
-                dtype=torch.float)
+                                    self._n_init_attrs,
+                                    dtype=torch.float)
 
         # Compute co-occurrence statistics.
         for attr_idx, attr in enumerate(self._all_attrs):
@@ -342,7 +343,7 @@ class LookupDataset(Dataset):
             denom = self._single_stats[attr][ctx_val]
             for dom_idx, dom_val in enumerate(cur['domain']):
                 numer = self._pair_stats[attr][cur['attribute']][ctx_val].get(dom_val, 0.)
-                cooccur_probs[dom_idx,attr_idx] = numer / denom
+                cooccur_probs[dom_idx, attr_idx] = numer / denom
 
         return cooccur_probs
 
@@ -356,7 +357,7 @@ class LookupDataset(Dataset):
             # Get the target values for this numerical group.
             attr_group = self._train_num_attrs_group[cur['attribute']]
             target_val_strs = [self._raw_data_dict[cur['_tid_']][attr]
-                    for attr in attr_group]
+                               for attr in attr_group]
 
             # We can skip this if we are in inference mode and any of the
             # target/current values in the numerical group are NULL.
@@ -365,10 +366,9 @@ class LookupDataset(Dataset):
 
             if not self.memoize:
                 return target_numvals
-            self._target_numvals[idx,0:len(target_numvals)] = target_numvals
+            self._target_numvals[idx, 0:len(target_numvals)] = target_numvals
 
         return self._target_numvals[idx]
-
 
     def _get_init_cat_idxs(self, idx):
         """
@@ -395,13 +395,12 @@ class LookupDataset(Dataset):
                 # the context value before, otherwise we assign the 0-vector.
                 if attr == cur['attribute'] or \
                         (self.inference_mode and \
-                        ctx_val not in self._seen_init_cat_vals[attr]):
+                         ctx_val not in self._seen_init_cat_vals[attr]):
                     init_cat_idxs.append(0)
                     continue
                 self._seen_init_cat_vals[attr].add(ctx_val)
                 init_cat_idxs.append(self._init_val_idxs[attr][ctx_val])
             init_cat_idxs = torch.LongTensor(init_cat_idxs)
-
 
             if not self.memoize:
                 return init_cat_idxs
@@ -465,10 +464,10 @@ class LookupDataset(Dataset):
             # It is faster not to memoize these.
             neg_idxs = self._get_neg_dom_idxs(idx)
             neg_sample = torch.LongTensor(np.random.choice(neg_idxs,
-                    size=min(len(neg_idxs), self.max_cat_domain - dom_size),
-                    replace=False))
+                                                           size=min(len(neg_idxs), self.max_cat_domain - dom_size),
+                                                           replace=False))
 
-            domain_idxs[dom_size:dom_size+len(neg_sample)] = neg_sample
+            domain_idxs[dom_size:dom_size + len(neg_sample)] = neg_sample
             dom_size += len(neg_sample)
 
         # Position of init in domain values (target)
@@ -509,7 +508,7 @@ class LookupDataset(Dataset):
         assert cur['_vid_'] == vid
 
         is_categorical = torch.ByteTensor([int(cur['attribute'] in self._train_cat_attrs)])
-        attr_idx  = torch.LongTensor([self._train_attr_idxs[cur['attribute']]])
+        attr_idx = torch.LongTensor([self._train_attr_idxs[cur['attribute']]])
         init_cat_idxs = self._get_init_cat_idxs(idx)
         init_numvals, init_nummask = self._get_init_numvals(idx)
 
@@ -524,28 +523,28 @@ class LookupDataset(Dataset):
             # TODO(richardwu): decide if we care about co-occurrence probabilities or not.
             # domain_cooccur = self._get_domain_cooccur_probs(idx)
             return vid, \
-                is_categorical, \
-                attr_idx, \
-                init_cat_idxs, \
-                init_numvals, \
-                init_nummask, \
-                domain_idxs, \
-                domain_mask, \
-                self._dummy_target_numvals, \
-                target
+                   is_categorical, \
+                   attr_idx, \
+                   init_cat_idxs, \
+                   init_numvals, \
+                   init_nummask, \
+                   domain_idxs, \
+                   domain_mask, \
+                   self._dummy_target_numvals, \
+                   target
 
         # Numerical VID
         target_numvals = self._get_target_numvals(idx)
         return vid, \
-            is_categorical, \
-            attr_idx, \
-            init_cat_idxs, \
-            init_numvals, \
-            init_nummask, \
-            self._dummy_domain_idxs, \
-            self._dummy_domain_mask, \
-            target_numvals, \
-            self._dummy_cat_target
+               is_categorical, \
+               attr_idx, \
+               init_cat_idxs, \
+               init_numvals, \
+               init_nummask, \
+               self._dummy_domain_idxs, \
+               self._dummy_domain_mask, \
+               target_numvals, \
+               self._dummy_cat_target
 
     def domain_values(self, vid):
         idx = self._vid_to_idx[vid]
@@ -592,6 +591,7 @@ class LookupDataset(Dataset):
         self._init_dummies()
         self._init_memoize_vecs()
 
+
 class IterSampler(Sampler):
     def __init__(self, iter):
         self.iter = iter
@@ -602,19 +602,19 @@ class IterSampler(Sampler):
     def __len__(self):
         return len(self.iter)
 
+
 class VidSampler(Sampler):
-    def __init__(self, domain_df, raw_df, num_attrs, numerical_attr_groups,
-            shuffle=True, train_only_clean=False):
+    def __init__(self, domain_df, raw_df, num_attrs, numerical_attr_groups, shuffle=True, train_only_clean=False):
         # No NULL categorical targets
         domain_df = domain_df[domain_df['attribute'].isin(num_attrs) | (domain_df['weak_label'] != NULL_REPR)]
-
 
         # No NULL values in each cell's numerical group (all must be non-null
         # since target_numvals requires all numerical values.
         if numerical_attr_groups:
             raw_data_dict = raw_df.set_index('_tid_').to_dict('index')
             attr_to_group = {attr: group for group in numerical_attr_groups
-                    for attr in group}
+                             for attr in group}
+
             def group_notnull(row):
                 tid = row['_tid_']
                 cur_attr = row['attribute']
@@ -622,12 +622,13 @@ class VidSampler(Sampler):
                 if cur_attr not in attr_to_group:
                     return True
                 return all(raw_data_dict[tid][attr] != NULL_REPR
-                        for attr in attr_to_group[cur_attr])
+                           for attr in attr_to_group[cur_attr])
+
             fil_notnull = domain_df.apply(group_notnull, axis=1)
 
             if domain_df.shape[0] and sum(fil_notnull) < domain_df.shape[0]:
-                logging.warning('dropping %d targets where target\'s numerical group contain NULLs',
-                        domain_df.shape[0] - sum(fil_notnull))
+                logging.debug('dropping %d targets where target\'s numerical group contain NULLs',
+                                domain_df.shape[0] - sum(fil_notnull))
                 domain_df = domain_df[fil_notnull]
 
         # Train on only clean cells
@@ -646,18 +647,72 @@ class VidSampler(Sampler):
         return len(self._vids)
 
 
+class VidSampler_DP(Sampler):
+    def __init__(self, domain_df, raw_df, num_attrs, numerical_attr_groups,
+                 shuffle=True, train_only_clean=False, minibatch_size=1, iterations=1):
+        # No NULL categorical targets
+        domain_df = domain_df[domain_df['attribute'].isin(num_attrs) | (domain_df['weak_label'] != NULL_REPR)]
+
+        # No NULL values in each cell's numerical group (all must be non-null
+        # since target_numvals requires all numerical values.
+        if numerical_attr_groups:
+            raw_data_dict = raw_df.set_index('_tid_').to_dict('index')
+            attr_to_group = {attr: group for group in numerical_attr_groups
+                             for attr in group}
+
+            def group_notnull(row):
+                tid = row['_tid_']
+                cur_attr = row['attribute']
+                # Non-numerical cell: return true
+                if cur_attr not in attr_to_group:
+                    return True
+                return all(raw_data_dict[tid][attr] != NULL_REPR
+                           for attr in attr_to_group[cur_attr])
+
+            fil_notnull = domain_df.apply(group_notnull, axis=1)
+
+            if domain_df.shape[0] and sum(fil_notnull) < domain_df.shape[0]:
+                logging.debug('dropping %d targets where target\'s numerical group contain NULLs',
+                                domain_df.shape[0] - sum(fil_notnull))
+                domain_df = domain_df[fil_notnull]
+
+        # Train on only clean cells
+        if train_only_clean:
+            self._vids = domain_df.loc[(domain_df['is_clean'] | domain_df['fixed'] >= 1), '_vid_']
+        else:
+            self._vids = domain_df['_vid_'].values
+
+        if shuffle:
+            self._vids = np.random.permutation(self._vids)
+
+        self.length = len(self._vids)
+        self.minibatch_size = minibatch_size
+
+    def __iter__(self):
+        # for _ in range(self.iterations):
+        indices = np.where(torch.rand(self.length) < (self.minibatch_size / self.length))[0]
+
+        while indices.size == 0:
+            indices = np.where(torch.rand(self.length) < (self.minibatch_size / self.length))[0]
+
+        return iter([self._vids.tolist()[i] for i in indices])
+
+    def __len__(self):
+        return self.minibatch_size
+
+
 class TupleEmbedding(Estimator, torch.nn.Module):
     WEIGHT_DECAY = 0.
 
     # TODO: replace numerical_attrs references with self.ds.numerical_attrs
     def __init__(self, env, dataset, domain_df,
-            numerical_attr_groups=None,
-            memoize=False,
-            neg_sample=True,
-            dropout_pct=0.,
-            learning_rate=0.05,
-            validate_fpath=None, validate_tid_col=None, validate_attr_col=None,
-            validate_val_col=None, validate_epoch=None):
+                 numerical_attr_groups=None,
+                 memoize=False,
+                 neg_sample=True,
+                 dropout_pct=0.,
+                 learning_rate=0.05,
+                 validate_fpath=None, validate_tid_col=None, validate_attr_col=None,
+                 validate_val_col=None, validate_epoch=None, reuse_embedding=False):
         """
         :param dataset: (Dataset) original dataset
         :param domain_df: (DataFrame) dataframe containing domain values
@@ -682,7 +737,7 @@ class TupleEmbedding(Estimator, torch.nn.Module):
         Estimator.__init__(self, env, dataset, domain_df)
 
         self.inference_mode = False
-
+        self.reuse_embedding = reuse_embedding
         assert dropout_pct < 1 and dropout_pct >= 0
         self.dropout_pct = dropout_pct
 
@@ -694,9 +749,9 @@ class TupleEmbedding(Estimator, torch.nn.Module):
         if train_attrs is not None:
             if not all(attr in self.ds.get_attributes() for attr in train_attrs):
                 logging.error('%s: all attributes specified to use for training %s must exist in dataset: %s',
-                        type(self).__name__,
-                        train_attrs,
-                        self.ds.get_attributes())
+                              type(self).__name__,
+                              train_attrs,
+                              self.ds.get_attributes())
                 raise Exception()
 
         ### Numerical attribute groups validation checks
@@ -704,11 +759,11 @@ class TupleEmbedding(Estimator, torch.nn.Module):
         self._numerical_attr_groups = numerical_attr_groups.copy()
         self._numerical_attrs = verify_numerical_attr_groups(self.ds, self._numerical_attr_groups)
         # Verify numerical dimensions are not bigger than the embedding size
-        if  max(list(map(len, numerical_attr_groups)) or [0]) > self._embed_size:
+        if max(list(map(len, numerical_attr_groups)) or [0]) > self._embed_size:
             logging.error("%s: maximum numeric value dimension %d must be <= embedding size %d",
-                    type(self).__name__,
-                    max(list(map(len, numerical_attr_groups)) or [0]),
-                    self._embed_size)
+                          type(self).__name__,
+                          max(list(map(len, numerical_attr_groups)) or [0]),
+                          self._embed_size)
             raise Exception()
         # Remove domain for numerical attributes.
         fil_numattr = self.domain_df['attribute'].isin(self._numerical_attrs)
@@ -722,8 +777,8 @@ class TupleEmbedding(Estimator, torch.nn.Module):
         filter_empty_domain = (self.domain_df['domain_size'] == 0) & ~fil_numattr
         if filter_empty_domain.sum():
             logging.warning('%s: removing %d categorical cells with empty domains',
-                type(self).__name__,
-                filter_empty_domain.sum())
+                            type(self).__name__,
+                            filter_empty_domain.sum())
             self.domain_df = self.domain_df[~filter_empty_domain]
         # Pre-split domain.
         self.domain_df['domain'] = self.domain_df['domain'].str.split('\|\|\|')
@@ -732,7 +787,7 @@ class TupleEmbedding(Estimator, torch.nn.Module):
         if self.ds.aux_table[AuxTables.dk_cells] is not None:
             df_dk = self.ds.aux_table[AuxTables.dk_cells].df
             self.domain_df = self.domain_df.merge(df_dk,
-                    on=['_tid_', 'attribute'], how='left', suffixes=('', '_dk'))
+                                                  on=['_tid_', 'attribute'], how='left', suffixes=('', '_dk'))
             self.domain_df['is_clean'] = self.domain_df['_cid__dk'].isnull()
         else:
             self.domain_df['is_clean'] = True
@@ -742,13 +797,13 @@ class TupleEmbedding(Estimator, torch.nn.Module):
 
         # Dataset
         self._dataset = LookupDataset(env, dataset, self.domain_df,
-                numerical_attr_groups, neg_sample, memoize)
+                                      numerical_attr_groups, neg_sample, memoize)
 
         self.max_cat_domain = self._dataset.max_cat_domain
         logging.debug('%s: max domain size: (categorical) %d, (numerical) %d',
-                type(self).__name__,
-                self.max_cat_domain,
-                self.max_domain)
+                      type(self).__name__,
+                      self.max_cat_domain,
+                      self.max_domain)
 
         self._train_cat_attrs = self._dataset._train_cat_attrs
         self._train_num_attrs = self._dataset._train_num_attrs
@@ -779,42 +834,42 @@ class TupleEmbedding(Estimator, torch.nn.Module):
         # Mask to combine numerical bases to form a numerical group
         self._n_num_attr_groups = len(self._numerical_attr_groups)
         self.num_attr_groups_mask = torch.zeros(self._n_num_attr_groups,
-                self._n_init_num_attrs, dtype=torch.float32)
+                                                self._n_init_num_attrs, dtype=torch.float32)
         for group_idx, group in enumerate(self._numerical_attr_groups):
             for attr in group:
                 attr_idx = self._dataset._init_attr_idxs[attr] - self._n_init_cat_attrs
-                self.num_attr_groups_mask[group_idx,attr_idx] = 1.
+                self.num_attr_groups_mask[group_idx, attr_idx] = 1.
         # For each numerical attribute we have a basis vector.
         # For each numerical group we find the linear combination from the
         # individual vectors.
         # We also have a learnable zero vector for every numerical group.
         self.in_num_bases = torch.nn.Parameter(torch.zeros(self._n_init_num_attrs,
-            self._embed_size))
+                                                           self._embed_size))
         self.in_num_zero_vecs = torch.nn.Parameter(torch.zeros(self._n_num_attr_groups,
-            self._embed_size))
+                                                               self._embed_size))
 
         # Non-linearity for numerical init attrs
         self.in_num_w1 = torch.nn.Parameter(torch.zeros(self._n_num_attr_groups, self._embed_size, self._embed_size))
         self.in_num_bias1 = torch.nn.Parameter(torch.zeros(self._n_num_attr_groups, self._embed_size))
 
-        self.out_num_bases = torch.nn.Parameter(torch.zeros(self._n_train_num_attrs, self._embed_size, self._max_num_dim))
+        self.out_num_bases = torch.nn.Parameter(
+            torch.zeros(self._n_train_num_attrs, self._embed_size, self._max_num_dim))
         # Non-linearity for combined_init for each numerical attr
         self.out_num_w1 = torch.nn.Parameter(torch.zeros(self._n_train_num_attrs, self._embed_size, self._embed_size))
         self.out_num_bias1 = torch.nn.Parameter(torch.zeros(self._n_train_num_attrs, self._embed_size))
 
-
         # Mask for _num_forward to restrict which dimensions are active for each attribute.
         # Hadamard/elementwise multiply this mask.
         self.out_num_masks = torch.zeros(self._n_train_num_attrs,
-                self._max_num_dim, dtype=torch.float32)
+                                         self._max_num_dim, dtype=torch.float32)
         # Mask to select out the relevant 1-d value for an attribute from
         # its attr group.
         self._num_attr_group_mask = torch.zeros(self._n_train_num_attrs,
-                self._max_num_dim, dtype=torch.float32)
+                                                self._max_num_dim, dtype=torch.float32)
         for idx, attr in enumerate(self._dataset._train_num_attrs):
             dim = len(self._dataset._train_num_attrs_group[attr])
             attr_idx = self._dataset._train_num_attrs_group[attr].index(attr)
-            self.out_num_masks[idx,:dim] = 1.
+            self.out_num_masks[idx, :dim] = 1.
             self._num_attr_group_mask[idx, attr_idx] = 1.
 
         # logits fed into softmax used in weighted sum to combine
@@ -824,12 +879,12 @@ class TupleEmbedding(Estimator, torch.nn.Module):
         # to predict for and there are init_attr weights since we have
         # init attrs to combine.
         self.attr_W = torch.nn.Parameter(torch.zeros(self._n_train_attrs,
-            self._n_init_cat_attrs + self._n_num_attr_groups))
+                                                     self._n_init_cat_attrs + self._n_num_attr_groups))
 
         # Weights for 1) embedding score and 2) co-occurrence probabilities
         # for categorical domain values.
         self.cat_feat_W = torch.nn.Parameter(torch.zeros(self._n_train_attrs,
-            1 + self._n_init_attrs, 1))
+                                                         1 + self._n_init_attrs, 1))
 
         # Initialize all but the first 0th vector embedding (reserved).
         torch.nn.init.xavier_uniform_(self.in_W[1:])
@@ -850,29 +905,43 @@ class TupleEmbedding(Estimator, torch.nn.Module):
         torch.nn.init.xavier_uniform_(self.attr_W)
         torch.nn.init.xavier_uniform_(self.cat_feat_W)
 
+        # check if we need to reuse the embedding from previous runs
+        self.load_embedding()
+
         self._cat_loss = CrossEntropyLoss()
         # TODO: we use MSE loss for all numerical attributes for now.
         # Allow user to pass in their desired loss.
         self._num_loss = MSELoss(reduction='mean')
-        self._optimizer = Adam(self.parameters(), lr=learning_rate, weight_decay=self.WEIGHT_DECAY)
+
+        if self.env['privacy']:
+            self._optimizer = optim.DPAdam(params=self.parameters(),
+                                           l2_norm_clip=self.env['l2_norm_clip'],
+                                           noise_multiplier=self.env['noise_multiplier'],
+                                           minibatch_size=self.env['minibatch_size'],
+                                           microbatch_size=self.env['microbatch_size'],
+                                           # lr=self.env['learning_rate'],
+                                           lr = learning_rate,
+                                           weight_decay=self.WEIGHT_DECAY)
+        else:
+            self._optimizer = Adam(self.parameters(), lr=learning_rate, weight_decay=self.WEIGHT_DECAY)
 
         # Validation stuff
         self._do_validation = False
         if validate_fpath is not None \
-            and validate_tid_col is not None \
-            and validate_attr_col is not None \
-            and validate_val_col is not None:
+                and validate_tid_col is not None \
+                and validate_attr_col is not None \
+                and validate_val_col is not None:
             self._validate_df = pd.read_csv(validate_fpath, dtype=str)
             self._validate_df.rename({validate_tid_col: '_tid_',
-                validate_attr_col: '_attribute_',
-                validate_val_col: '_value_',
-                }, axis=1, inplace=True)
+                                      validate_attr_col: '_attribute_',
+                                      validate_val_col: '_value_',
+                                      }, axis=1, inplace=True)
             self._validate_df['_tid_'] = self._validate_df['_tid_'].astype(int)
             self._validate_df['_value_'] = self._validate_df['_value_'].str.strip().str.lower()
             # Merge left so we can still get # of repairs for cells without
             # ground truth.
             self._validate_df = self.domain_df.merge(self._validate_df, how='left',
-                    left_on=['_tid_', 'attribute'], right_on=['_tid_', '_attribute_'])
+                                                     left_on=['_tid_', 'attribute'], right_on=['_tid_', '_attribute_'])
             self._validate_df['_value_'].fillna(NULL_REPR, inplace=True)
             # | separated correct values
             self._validate_df['_value_'] = self._validate_df['_value_'].str.split('\|')
@@ -886,18 +955,19 @@ class TupleEmbedding(Estimator, torch.nn.Module):
                 bad_numerics = fil_attr & fil_notnull & fil_notnumeric
                 if bad_numerics.sum():
                     logging.error('%s: validation dataframe contains %d non-numerical values in numerical attrs %s',
-                        type(self).__name__,
-                        bad_numerics.sum(),
-                        self._numerical_attrs)
+                                  type(self).__name__,
+                                  bad_numerics.sum(),
+                                  self._numerical_attrs)
                     raise Exception()
 
             # Log how many cells are actually repairable based on domain generated.
             # Cells without ground truth are "not repairable".
-            fil_repairable = self._validate_df[fil_notnull].apply(lambda row: any(v in row['domain'] for v in row['_value_']), axis=1)
+            fil_repairable = self._validate_df[fil_notnull].apply(
+                lambda row: any(v in row['domain'] for v in row['_value_']), axis=1)
             logging.debug("%s: max repairs possible (# cells ground truth in domain): (DK) %d, (all): %d",
-                        type(self).__name__,
-                        (fil_repairable & ~self._validate_df['is_clean']).sum(),
-                        fil_repairable.sum())
+                          type(self).__name__,
+                          (fil_repairable & ~self._validate_df['is_clean']).sum(),
+                          fil_repairable.sum())
 
             self._validate_df = self._validate_df[['_vid_', 'attribute', 'init_value', '_value_', 'is_clean']]
             self._validate_epoch = validate_epoch or 1
@@ -917,7 +987,8 @@ class TupleEmbedding(Estimator, torch.nn.Module):
         init_cat_vecs = torch.zeros(init_cat_idxs.shape[0], 0, self._embed_size)
         if self._n_init_cat_attrs:
             # (batch, n_init_cat_attrs, embed size)
-            init_cat_vecs = self.in_W.index_select(0, init_cat_idxs.view(-1)).view(*init_cat_idxs.shape, self._embed_size)
+            init_cat_vecs = self.in_W.index_select(0, init_cat_idxs.view(-1)).view(*init_cat_idxs.shape,
+                                                                                   self._embed_size)
 
         init_num_vecs = torch.zeros(init_numvals.shape[0], 0, self._embed_size)
         if self._n_init_num_attrs:
@@ -929,18 +1000,16 @@ class TupleEmbedding(Estimator, torch.nn.Module):
             # (batch, n_init_num_attrs, embed_size)
             init_num_vecs = in_num_bases.mul(init_numvals)
 
-
             # self.num_attr_groups_mask is shape (n_num_attr_groups, n_init_num_attrs)
             # (batch, n_num_attr_groups, n_init_num_attrs)
             groups_mask = self.num_attr_groups_mask.expand(init_numvals.shape[0],
-                    -1, -1)
+                                                           -1, -1)
 
             # (batch, n_num_attr_groups, n_init_num_attrs, embed_size)
             init_num_vecs = groups_mask.unsqueeze(-1) \
-                    * init_num_vecs.unsqueeze(1).expand(-1, self._n_num_attr_groups, -1, -1)
+                            * init_num_vecs.unsqueeze(1).expand(-1, self._n_num_attr_groups, -1, -1)
             # (batch, n_num_attr_groups, embed_size)
             init_num_vecs = init_num_vecs.sum(dim=2) + self.in_num_zero_vecs.unsqueeze(0)
-
 
             #### Add non-linearity to numerical attributes
             # (batch, n_num_attr_groups, embed_size)
@@ -949,8 +1018,7 @@ class TupleEmbedding(Estimator, torch.nn.Module):
             in_num_w1 = self.in_num_w1.expand(init_numvals.shape[0], -1, -1, -1)
             # (batch, n_num_attr_groups, embed_size)
             init_num_vecs = init_num_vecs.unsqueeze(-2).matmul(in_num_w1).squeeze(-2) \
-                    + self.in_num_bias1.unsqueeze(0)
-
+                            + self.in_num_bias1.unsqueeze(0)
 
             # (batch, n_num_attr_groups, 1)
             # If any of the init values are NULL in a group, zero it out.
@@ -958,7 +1026,8 @@ class TupleEmbedding(Estimator, torch.nn.Module):
             # individual numeric attribute's mask and comparing
             # how many numerical attributes got dropped per group.
             init_group_nummasks = (groups_mask.sum(dim=-1, keepdim=True) \
-                    == (groups_mask * init_nummasks.unsqueeze(1)).sum(dim=-1, keepdim=True)).type(torch.FloatTensor)
+                                   == (groups_mask * init_nummasks.unsqueeze(1)).sum(dim=-1, keepdim=True)).type(
+                torch.FloatTensor)
 
             # (batch, n_num_attr_groups, embed_size)
             init_num_vecs.mul_(init_group_nummasks)
@@ -1050,7 +1119,6 @@ class TupleEmbedding(Estimator, torch.nn.Module):
         # (batch, 1, embed size)
         out_num_bias1 = self.out_num_bias1.index_select(0, num_attr_idxs.view(-1)).unsqueeze(1)
 
-
         # Apply non-linearity
         ReLU(inplace=True)(combined_init)
         # (batch, 1, embed size)
@@ -1077,7 +1145,7 @@ class TupleEmbedding(Estimator, torch.nn.Module):
         """
         # (batch, embed size, 1)
         combined_init = self._get_combined_init_vec(init_cat_idxs, init_numvals,
-                init_nummasks, attr_idxs)
+                                                    init_nummasks, attr_idxs)
 
         # (# of cat VIDs), (# of num VIDs)
         cat_mask, num_mask = self._cat_num_masks(is_categorical)
@@ -1085,17 +1153,17 @@ class TupleEmbedding(Estimator, torch.nn.Module):
         cat_logits = torch.empty(0, self.max_cat_domain)
         if len(cat_mask):
             cat_combined_init, domain_idxs, domain_masks = \
-                    combined_init[cat_mask], \
-                    domain_idxs[cat_mask], \
-                    domain_masks[cat_mask]
+                combined_init[cat_mask], \
+                domain_idxs[cat_mask], \
+                domain_masks[cat_mask]
             # (# of cat VIDs, max_cat_domain)
             cat_logits = self._cat_forward(cat_combined_init, domain_idxs,
-                    domain_masks)
+                                           domain_masks)
 
         pred_numvals = torch.empty(0, self._max_num_dim)
         if len(num_mask):
             num_combined_init, num_attr_idxs = combined_init[num_mask], \
-                    self._num_attr_idxs(is_categorical, attr_idxs)
+                                               self._num_attr_idxs(is_categorical, attr_idxs)
             # (# of num VIDs, max_num_dim)
             pred_numvals = self._num_forward(num_combined_init, num_attr_idxs)
 
@@ -1106,8 +1174,8 @@ class TupleEmbedding(Estimator, torch.nn.Module):
         is_categorical: (batch, 1)
         """
         # TODO: is_catrgorical is already ByteTensor: use  torch.mask_tensor
-        cat_mask, num_mask = is_categorical.view(-1).nonzero().view(-1),\
-            (is_categorical.view(-1) == 0).nonzero().view(-1)
+        cat_mask, num_mask = is_categorical.view(-1).nonzero().view(-1), \
+                             (is_categorical.view(-1) == 0).nonzero().view(-1)
         return cat_mask, num_mask
 
     def _num_attr_idxs(self, is_categorical, attr_idxs):
@@ -1127,10 +1195,103 @@ class TupleEmbedding(Estimator, torch.nn.Module):
         # (# of numerical examples, 1)
         return num_attr_idxs
 
-    def train(self, num_epochs=10, batch_size=32, weight_entropy_lambda=0.,
-            shuffle=True, train_only_clean=False):
+    def train(self, batch_size=32, weight_entropy_lambda=0., shuffle=True, train_only_clean=False):
+
+        if self.env['privacy']:
+            batch_losses = self.train_dp(weight_entropy_lambda, shuffle, train_only_clean)
+        else:
+            batch_losses = self.train_original(batch_size, weight_entropy_lambda, shuffle, train_only_clean)
+
+        # save the embedding for reuse
+        self.save_embedding()
+
+        return batch_losses
+
+    def train_dp(self, weight_entropy_lambda, shuffle, train_only_clean):
+
+        minibatch_size = self.env['minibatch_size']
+        iterations = self.env['iterations']
+        microbatch_size = self.env['microbatch_size']
+
+        scheduler = CosineAnnealingLR(self._optimizer, iterations)
+        logging.debug('%s: using cosine LR scheduler with %d steps', type(self).__name__, iterations)
+
+        batch_losses = []
+        # Main training loop.
+        for epoch_idx in tqdm(range(1, iterations + 1)):
+
+            # Returns VIDs to train on.
+            sampler = VidSampler_DP(self.domain_df, self.ds.get_raw_data(),
+                                    self._numerical_attrs, self._numerical_attr_groups,
+                                    shuffle=shuffle, train_only_clean=train_only_clean,
+                                    minibatch_size=minibatch_size, iterations=iterations)
+
+            logging.debug('%s: iterations %d of %d', type(self).__name__, epoch_idx, iterations)
+            batch_cnt = 0
+
+            self._optimizer.zero_grad()
+
+            for vids, is_categorical, attr_idxs, \
+                init_cat_idxs, init_numvals, init_nummasks, \
+                domain_idxs, domain_masks, \
+                target_numvals, cat_targets \
+                    in DataLoader(self._dataset, batch_size=microbatch_size, sampler=sampler):
+
+                cat_preds, numval_preds = self.forward(is_categorical, attr_idxs,
+                                                       init_cat_idxs, init_numvals, init_nummasks,
+                                                       domain_idxs, domain_masks)
+
+                # Select out the appropriate targets
+                cat_mask, num_mask = self._cat_num_masks(is_categorical)
+                cat_targets = cat_targets.view(-1)[cat_mask]
+                target_numvals = target_numvals[num_mask]
+
+                assert cat_preds.shape[0] == cat_targets.shape[0]
+                assert numval_preds.shape == target_numvals.shape
+
+                batch_loss = 0.
+                if cat_targets.shape[0] > 0:
+                    batch_loss += self._cat_loss(cat_preds, cat_targets)
+                if target_numvals.shape[0] > 0:
+                    # Note both numval_preds and target_numvals have 0-ed out
+                    # values if the sample's dimension is < max dim.
+                    # TODO: downweight samples that are part of a group of n attributes
+                    # by 1/n.
+                    batch_loss += self._num_loss(numval_preds, target_numvals)
+
+                # Add the negative entropy of the attr_W to the cost: that is
+                # we maximize entropy of the logits of attr_W to encourage
+                # non-sparsity of logits.
+                if weight_entropy_lambda != 0.:
+                    attr_weights = Softmax(dim=1)(self.attr_W).view(-1)
+                    neg_attr_W_entropy = attr_weights.dot(attr_weights.log()) / self.attr_W.shape[0]
+                    batch_loss.add_(weight_entropy_lambda * neg_attr_W_entropy)
+
+                batch_losses.append(float(batch_loss))
+                self._optimizer.zero_microbatch_grad()
+                batch_loss.backward()
+
+                # Do not update weights for 0th reserved vectors.
+                if self.in_W._grad is not None:
+                    self.in_W._grad[0].zero_()
+                if self.out_W._grad is not None:
+                    self.out_W._grad[0].zero_()
+                if self.out_B._grad is not None:
+                    self.out_B._grad[0].zero_()
+
+                self._optimizer.microbatch_step()
+                batch_cnt += 1
+
+            self._optimizer.step()
+            scheduler.step()
+            logging.debug('%s: average batch loss: %f',
+                          type(self).__name__,
+                          sum(batch_losses[-1 * batch_cnt:]) / batch_cnt)
+
+        return batch_losses
+
+    def train_original(self, batch_size, weight_entropy_lambda, shuffle, train_only_clean):
         """
-        :param num_epochs: (int) number of epochs to train for
         :param batch_size: (int) size of batches
         :param weight_entropy_lambda: (float) penalization strength for
             weights assigned to other attributes for a given attribute.
@@ -1142,30 +1303,31 @@ class TupleEmbedding(Estimator, torch.nn.Module):
             error detection. Recommend False if error detector is very liberal.
         """
 
+        # Fix the number of iteration to 20 in non-private runs
+        iterations = 20
+
         # Returns VIDs to train on.
         sampler = VidSampler(self.domain_df, self.ds.get_raw_data(),
-                self._numerical_attrs, self._numerical_attr_groups,
-                shuffle=shuffle, train_only_clean=train_only_clean)
+                             self._numerical_attrs, self._numerical_attr_groups,
+                             shuffle=shuffle, train_only_clean=train_only_clean)
 
-        logging.debug("%s: training (lambda = %f) on %d cells (%d cells in total) in:\n1) %d categorical columns: %s\n2) %d numerical columns: %s",
-                      type(self).__name__,
-                      weight_entropy_lambda,
-                      len(sampler),
-                      self.domain_df.shape[0],
-                      self._n_train_cat_attrs,
-                      self._train_cat_attrs,
-                      self._n_train_num_attrs,
-                      self._train_num_attrs)
+        logging.debug(
+            "%s: training (lambda = %f) on %d cells (%d cells in total) in:\n1) %d categorical columns: %s\n2) %d numerical columns: %s",
+            type(self).__name__,
+            weight_entropy_lambda,
+            len(sampler),
+            self.domain_df.shape[0],
+            self._n_train_cat_attrs,
+            self._train_cat_attrs,
+            self._n_train_num_attrs,
+            self._train_num_attrs)
 
         num_batches = len(DataLoader(self._dataset, batch_size=batch_size, sampler=sampler))
-        num_steps = num_epochs * num_batches
-        # scheduler = CosineAnnealingLR(self._optimizer, num_steps)
-        # logging.debug('%s: using cosine LR scheduler with %d steps', type(self).__name__, num_steps)
 
         batch_losses = []
         # Main training loop.
-        for epoch_idx in range(1, num_epochs+1):
-            logging.debug('%s: epoch %d of %d', type(self).__name__, epoch_idx, num_epochs)
+        for epoch_idx in tqdm(range(1, iterations + 1)):
+            logging.debug('%s: epoch %d of %d', type(self).__name__, epoch_idx, iterations)
             batch_cnt = 0
             scheduler = CosineAnnealingLR(self._optimizer, num_batches)
             logging.debug('%s: using cosine LR scheduler with %d steps', type(self).__name__, num_batches)
@@ -1174,11 +1336,11 @@ class TupleEmbedding(Estimator, torch.nn.Module):
                 init_cat_idxs, init_numvals, init_nummasks, \
                 domain_idxs, domain_masks, \
                 target_numvals, cat_targets \
-                in tqdm(DataLoader(self._dataset, batch_size=batch_size, sampler=sampler)):
+                    in DataLoader(self._dataset, batch_size=batch_size, sampler=sampler):
 
                 cat_preds, numval_preds = self.forward(is_categorical, attr_idxs,
-                        init_cat_idxs, init_numvals, init_nummasks,
-                        domain_idxs, domain_masks)
+                                                       init_cat_idxs, init_numvals, init_nummasks,
+                                                       domain_idxs, domain_masks)
 
                 # Select out the appropriate targets
                 cat_mask, num_mask = self._cat_num_masks(is_categorical)
@@ -1223,8 +1385,8 @@ class TupleEmbedding(Estimator, torch.nn.Module):
                 batch_cnt += 1
 
             logging.debug('%s: average batch loss: %f',
-                    type(self).__name__,
-                    sum(batch_losses[-1 * batch_cnt:]) / batch_cnt)
+                          type(self).__name__,
+                          sum(batch_losses[-1 * batch_cnt:]) / batch_cnt)
 
             if self._do_validation and epoch_idx % self._validate_epoch == 0:
                 res = self.validate()
@@ -1247,7 +1409,7 @@ class TupleEmbedding(Estimator, torch.nn.Module):
             batch_sz = int(1e5 / self._embed_size)
             num_batches = math.ceil(len(vids) / batch_sz)
             logging.debug('%s: getting features in batches (# batches = %d, size = %d) ...',
-                    type(self).__name__, num_batches, batch_sz)
+                          type(self).__name__, num_batches, batch_sz)
 
             mask_offset = 0
 
@@ -1255,16 +1417,17 @@ class TupleEmbedding(Estimator, torch.nn.Module):
             for vids, is_categorical, attr_idxs, \
                 init_cat_idxs, init_numvals, init_nummasks, \
                 domain_idxs, domain_masks, \
-                target_numvals, cat_targets in tqdm(DataLoader(self._dataset, batch_size=batch_sz, sampler=IterSampler(vids))):
+                target_numvals, cat_targets in tqdm(
+                DataLoader(self._dataset, batch_size=batch_sz, sampler=IterSampler(vids))):
 
                 # (# of cats, max cat domain), (# of num, max_num_dim)
                 cat_logits, num_predvals = self.forward(is_categorical,
-                        attr_idxs,
-                        init_cat_idxs,
-                        init_numvals,
-                        init_nummasks,
-                        domain_idxs,
-                        domain_masks)
+                                                        attr_idxs,
+                                                        init_cat_idxs,
+                                                        init_numvals,
+                                                        init_nummasks,
+                                                        domain_idxs,
+                                                        domain_masks)
 
                 if cat_logits.nelement():
                     cat_probas = Softmax(dim=1)(cat_logits)
@@ -1292,7 +1455,6 @@ class TupleEmbedding(Estimator, torch.nn.Module):
             self.set_mode(inference_mode=False)
 
             return ret_cat_probas.detach(), ret_num_predvals.detach(), ret_is_categorical.detach()
-
 
     def _model_fpaths(self, prefix):
         return '%s_sdict.pkl' % prefix, '%s_ds_state.pkl' % prefix
@@ -1325,8 +1487,8 @@ class TupleEmbedding(Estimator, torch.nn.Module):
 
         if not os.path.exists(sdict_fpath) or not os.path.exists(ds_fpath):
             logging.warning('%s: cannot load model from prefix %s',
-                    type(self).__name__,
-                    prefix)
+                            type(self).__name__,
+                            prefix)
             return False
 
         logging.debug('%s: loading saved model from %s and %s',
@@ -1338,7 +1500,7 @@ class TupleEmbedding(Estimator, torch.nn.Module):
             self._dataset.load_state(pickle.load(f))
         return True
 
-    def dump_predictions(self, prefix, include_all=False):
+    def dump_predictions(self, prefix, include_all=False, include_std=False):
         """
         Dump inference results to ":param:`prefix`_predictions.pkl" (if not None).
         Returns the dataframe of results.
@@ -1346,35 +1508,36 @@ class TupleEmbedding(Estimator, torch.nn.Module):
         include_all = True will include all domain values and their prediction
         probabilities for categorical attributes.
         """
-        preds = self.predict_pp_batch()
+        preds = self.predict_pp_batch(df=None, n_val_limit=None, include_std=include_std)
 
-        logging.debug('%s: constructing and dumping predictions...',
-                      type(self).__name__)
+        logging.debug('%s: constructing and dumping predictions...', type(self).__name__)
         results = []
+        _results = []
         for ((vid, is_cat, pred), row) in zip(preds, self.domain_recs):
             assert vid == row['_vid_']
+
             if is_cat:
                 # Include every domain value and their predicted probabilities
                 if include_all:
                     for val, proba in pred:
                         results.append({'tid': row['_tid_'],
-                            'vid': vid,
-                            'attribute': row['attribute'],
-                            'inferred_val': val,
-                            'proba': proba})
+                                        'vid': vid,
+                                        'attribute': row['attribute'],
+                                        'inferred_val': val,
+                                        'proba': proba})
                 else:
                     max_val, max_proba = max(pred, key=lambda t: t[1])
                     results.append({'tid': row['_tid_'],
-                        'vid': vid,
-                        'attribute': row['attribute'],
-                        'inferred_val': max_val,
-                        'proba': max_proba})
+                                    'vid': vid,
+                                    'attribute': row['attribute'],
+                                    'inferred_val': max_val,
+                                    'proba': max_proba})
             else:
                 results.append({'tid': row['_tid_'],
-                    'vid': vid,
-                    'attribute': row['attribute'],
-                    'inferred_val': pred,
-                    'proba': -1})
+                                'vid': vid,
+                                'attribute': row['attribute'],
+                                'inferred_val': pred,
+                                'proba': -1})
 
         results = pd.DataFrame(results)
 
@@ -1398,12 +1561,11 @@ class TupleEmbedding(Estimator, torch.nn.Module):
                 inf_val, inf_prob = preds, -1
 
             df_pred.append({'_vid_': vid,
-                'is_cat': is_cat,
-                'inferred_val': inf_val,
-                'proba': inf_prob})
+                            'is_cat': is_cat,
+                            'inferred_val': inf_val,
+                            'proba': inf_prob})
         df_pred = pd.DataFrame(df_pred)
         df_res = self._validate_df.merge(df_pred, on=['_vid_'])
-
 
         # General filters and metrics
         fil_dk = ~df_res['is_clean']
@@ -1412,8 +1574,8 @@ class TupleEmbedding(Estimator, torch.nn.Module):
 
         if (~fil_grdth).sum():
             logging.debug('%s: there are %d cells with no validation ground truth',
-                    type(self).__name__,
-                    (~fil_grdth).sum())
+                          type(self).__name__,
+                          (~fil_grdth).sum())
 
         n_cat = fil_cat.sum()
         n_num = (~fil_cat).sum()
@@ -1423,10 +1585,10 @@ class TupleEmbedding(Estimator, torch.nn.Module):
 
         # Categorical filters and metrics
         fil_err = df_res.apply(lambda row: row['init_value'] not in row['_value_'],
-                axis=1) & fil_cat & fil_grdth
+                               axis=1) & fil_cat & fil_grdth
         fil_noterr = ~fil_err & fil_cat & fil_grdth
         fil_cor = df_res.apply(lambda row: row['inferred_val'] in row['_value_'],
-                axis=1) & fil_cat & fil_grdth
+                               axis=1) & fil_cat & fil_grdth
         fil_repair = (df_res['init_value'] != df_res['inferred_val']) & fil_cat
 
         total_err = fil_err.sum()
@@ -1451,11 +1613,11 @@ class TupleEmbedding(Estimator, torch.nn.Module):
         precision_dk = n_cor_repair_dk / max(n_repair_dk, 1)
         repair_recall = n_cor_repair_dk / max(detected_err, 1)
 
-
         def calc_rmse(df_filter):
             if df_filter.sum() == 0:
                 return 0
-            X_cor = df_res.loc[df_filter, '_value_'].apply(lambda arr: arr[0] if arr[0] != '_nan_' else 0.).values.astype(np.float)
+            X_cor = df_res.loc[df_filter, '_value_'].apply(
+                lambda arr: arr[0] if arr[0] != '_nan_' else 0.).values.astype(np.float)
             X_inferred = df_res.loc[df_filter, 'inferred_val'].values.astype(np.float)
             assert X_cor.shape == X_inferred.shape
             return np.sqrt(np.mean((X_cor - X_inferred) ** 2))
@@ -1475,55 +1637,55 @@ class TupleEmbedding(Estimator, torch.nn.Module):
 
         # Compile results
         val_res = {'n_cat': n_cat,
-            'n_num': n_num,
-            'n_cat_dk': n_cat_dk,
-            'n_num_dk': n_num_dk,
-            'total_err': total_err,
-            'detected_err': detected_err,
-            'n_repair': n_repair,
-            'n_repair_dk': n_repair_dk,
-            'sample_acc': sample_acc,
-            'precision': precision,
-            'recall': recall,
-            'precision_dk': precision_dk,
-            'repair_recall': repair_recall,
-            'rmse': rmse,
-            'rmse_dk': rmse_dk,
-            'rmse_by_attr': rmse_by_attr,
-            'rmse_dk_by_attr': rmse_dk_by_attr,
-            }
+                   'n_num': n_num,
+                   'n_cat_dk': n_cat_dk,
+                   'n_num_dk': n_num_dk,
+                   'total_err': total_err,
+                   'detected_err': detected_err,
+                   'n_repair': n_repair,
+                   'n_repair_dk': n_repair_dk,
+                   'sample_acc': sample_acc,
+                   'precision': precision,
+                   'recall': recall,
+                   'precision_dk': precision_dk,
+                   'repair_recall': repair_recall,
+                   'rmse': rmse,
+                   'rmse_dk': rmse_dk,
+                   'rmse_by_attr': rmse_by_attr,
+                   'rmse_dk_by_attr': rmse_dk_by_attr,
+                   }
 
         logging.debug("%s: # categoricals: (all) %d, (DK) %d",
-                type(self).__name__, val_res['n_cat'], val_res['n_cat_dk'])
+                      type(self).__name__, val_res['n_cat'], val_res['n_cat_dk'])
         logging.debug("%s: # numericals: (all) %d, (DK) %d",
-                type(self).__name__, val_res['n_num'], val_res['n_num_dk'])
+                      type(self).__name__, val_res['n_num'], val_res['n_num_dk'])
 
         logging.debug("%s: # of errors: %d, # of detected errors: %d",
-                type(self).__name__, val_res['total_err'], val_res['detected_err'])
+                      type(self).__name__, val_res['total_err'], val_res['detected_err'])
 
         logging.debug("%s: In-sample accuracy: %.3f",
-                type(self).__name__, val_res['sample_acc'])
+                      type(self).__name__, val_res['sample_acc'])
 
         logging.debug("%s: # repairs: (all) %d, (DK) %d",
-                type(self).__name__, val_res['n_repair'], val_res['n_repair_dk'])
+                      type(self).__name__, val_res['n_repair'], val_res['n_repair_dk'])
 
         logging.debug("%s: (Infer on all) Precision: %.3f, Recall: %.3f",
-                type(self).__name__, val_res['precision'], val_res['recall'])
+                      type(self).__name__, val_res['precision'], val_res['recall'])
         logging.debug("%s: (Infer on DK) Precision: %.3f, Repair Recall: %.3f",
-                type(self).__name__, val_res['precision_dk'], val_res['repair_recall'])
+                      type(self).__name__, val_res['precision_dk'], val_res['repair_recall'])
 
         if val_res['n_num']:
             logging.debug("%s: RMSE: (all) %f, (DK) %f", type(self).__name__,
-                    val_res['rmse'], val_res['rmse_dk'])
+                          val_res['rmse'], val_res['rmse_dk'])
             logging.debug("%s: RMSE per attr:", type(self).__name__)
             for attr in self._numerical_attrs:
                 logging.debug("\t'%s': (all) %f, (DK) %f", attr,
-                        val_res['rmse_by_attr'].get(attr, np.nan),
-                        val_res['rmse_dk_by_attr'].get(attr, np.nan))
+                              val_res['rmse_by_attr'].get(attr, np.nan),
+                              val_res['rmse_dk_by_attr'].get(attr, np.nan))
 
         return val_res
 
-    def predict_pp_batch(self, df=None):
+    def predict_pp_batch(self, df=None, n_val_limit=None, include_std=False):
         """
         Performs batch prediction.
 
@@ -1544,7 +1706,7 @@ class TupleEmbedding(Estimator, torch.nn.Module):
         batch_sz = int(1e5 / self._embed_size)
         num_batches = math.ceil(df.shape[0] / batch_sz)
         logging.debug('%s: starting batched (# batches = %d, size = %d) prediction...',
-                type(self).__name__, num_batches, batch_sz)
+                      type(self).__name__, num_batches, batch_sz)
         self.set_mode(inference_mode=True)
 
         # No gradients required.
@@ -1552,14 +1714,15 @@ class TupleEmbedding(Estimator, torch.nn.Module):
             for vids, is_categorical, attr_idxs, \
                 init_cat_idxs, init_numvals, init_nummasks, \
                 domain_idxs, domain_masks, \
-                target_numvals, cat_targets in tqdm(DataLoader(self._dataset, batch_size=batch_sz, sampler=IterSampler(df['_vid_'].values))):
+                target_numvals, cat_targets in \
+                    DataLoader(self._dataset, batch_size=batch_sz, sampler=IterSampler(df['_vid_'].values)):
                 pred_cats, pred_nums = self.forward(is_categorical,
-                        attr_idxs,
-                        init_cat_idxs,
-                        init_numvals,
-                        init_nummasks,
-                        domain_idxs,
-                        domain_masks)
+                                                    attr_idxs,
+                                                    init_cat_idxs,
+                                                    init_numvals,
+                                                    init_nummasks,
+                                                    domain_idxs,
+                                                    domain_masks)
 
                 pred_cat_idx = 0
                 pred_num_idx = 0
@@ -1570,21 +1733,188 @@ class TupleEmbedding(Estimator, torch.nn.Module):
                         logits = pred_cats[pred_cat_idx]
                         pred_cat_idx += 1
                         n_cats += 1
-                        yield vid, bool(is_cat), zip(self._dataset.domain_values(vid), map(float, Softmax(dim=0)(logits)))
+
+                        pred_vals = self._dataset.domain_values(vid)
+                        pred_probas = map(float, Softmax(dim=0)(logits))
+
+                        if n_val_limit is not None:
+                            sorted_pair = sorted(zip(pred_probas, pred_vals), reverse=True)
+                            pred_vals = [x for _, x in sorted_pair]
+                            pred_probas = [x for x, _ in sorted_pair]
+
+                            pred_vals = pred_vals[:n_val_limit]
+                            pred_probas = pred_probas[:n_val_limit]
+
+                        # yield vid, bool(is_cat), zip(self._dataset.domain_values(vid),
+                        #                              map(float, Softmax(dim=0)(logits)))
+                        yield vid, bool(is_cat), zip(pred_vals, pred_probas)
                         continue
 
                     # Real valued prediction
 
                     # Find the z-score and map it back to its actual value
-                    attr = train_idx_to_attr[int(attr_idxs[idx,0])]
+                    attr = train_idx_to_attr[int(attr_idxs[idx, 0])]
                     group_idx = self._dataset._train_num_attrs_group[attr].index(attr)
                     mean = self._dataset._num_attrs_mean[attr]
                     std = self._dataset._num_attrs_std[attr]
-                    pred_num = float(pred_nums[pred_num_idx,group_idx]) * std + mean
+
+                    num = float(pred_nums[pred_num_idx, group_idx])
+                    pred_num = num * std + mean
+                    if include_std:
+                        pred_num = f'{str(pred_num)}_{str(std)}_{str(mean)}'
+
                     pred_num_idx += 1
                     n_nums += 1
                     yield vid, False, pred_num
 
         self.set_mode(inference_mode=False)
         logging.debug('%s: done batch prediction on %d categorical and %d numerical VIDs.',
-                type(self).__name__, n_cats, n_nums)
+                      type(self).__name__, n_cats, n_nums)
+
+    def _embedding_path(self):
+        return f'embedding_for_syn.pkl'
+
+    def save_embedding(self):
+        # if not self.reuse_embedding:
+        #     return
+        # save current embedding into file
+        saved_dict = {'in_W': self.in_W, 'out_W': self.out_W, 'out_B': self.out_B,
+                      'in_num_zero_vecs': self.in_num_zero_vecs, 'in_num_bases': self.in_num_bases,
+                      'in_num_w1': self.in_num_w1, 'in_num_bias1': self.in_num_bias1,
+                      'out_num_bases': self.out_num_bases, 'out_num_w1': self.out_num_w1,
+                      'out_num_bias1': self.out_num_bias1, 'attr_W': self.attr_W, 'cat_feat_W': self.cat_feat_W}
+
+        torch.save(saved_dict, self._embedding_path())
+
+        logging.info("%s: done saving embedding from current run", type(self).__name__)
+
+    def load_embedding(self):
+        if not self.reuse_embedding:
+            return
+        if self._n_init_attrs <= 2:
+            if os.path.exists(self._embedding_path()):
+                os.remove(self._embedding_path())
+            return
+
+        # load the embeddings from previous run
+        assert os.path.exists(self._embedding_path())
+        saved_dict = torch.load(self._embedding_path())
+
+        saved_in_W = saved_dict['in_W']
+        saved_out_W = saved_dict['out_W']
+        saved_out_B = saved_dict['out_B']
+
+        saved_in_num_zero_vecs = saved_dict['in_num_zero_vecs']
+        saved_in_num_bases = saved_dict['in_num_bases']
+        saved_in_num_w1 = saved_dict['in_num_w1']
+        saved_in_num_bias1 = saved_dict['in_num_bias1']
+
+        saved_out_num_bases = saved_dict['out_num_bases']
+        saved_out_num_w1 = saved_dict['out_num_w1']
+        saved_out_num_bias1 = saved_dict['out_num_bias1']
+
+        saved_attr_W = saved_dict['attr_W']
+        saved_cat_feat_W = saved_dict['cat_feat_W']
+
+        with torch.no_grad():
+            assert self.in_W.size(1) == saved_in_W.size(1)
+            self.in_W[:saved_in_W.size()[0], :] = saved_in_W
+
+            if self._n_init_num_attrs > 0:
+                assert self.in_num_bases.size(1) == saved_in_num_bases.size(1)
+                self.in_num_bases[:saved_in_num_bases.size(0), :] = saved_in_num_bases
+
+                assert self.in_num_zero_vecs.size(1) == saved_in_num_zero_vecs.size(1)
+                self.in_num_zero_vecs[:saved_in_num_zero_vecs.size(0), :] = saved_in_num_zero_vecs
+
+                assert self.in_num_w1.size(1) == saved_in_num_w1.size(1)
+                assert self.in_num_w1.size(2) == saved_in_num_w1.size(2)
+                self.in_num_w1[:saved_in_num_w1.size(0), :, :] = saved_in_num_w1
+
+                assert self.in_num_bias1.size(1) == saved_in_num_bias1.size(1)
+                self.in_num_bias1[:saved_in_num_bias1.size(0), :] = saved_in_num_bias1
+
+            if self._n_train_num_attrs > 0:
+                if saved_out_num_bases.size(0) > 0:
+                    assert self.out_num_bases.size(1) == saved_out_num_bases.size(1)
+                    assert self.out_num_bases.size(2) == saved_out_num_bases.size(2)
+                    self.out_num_bases[:saved_out_num_bases.size(0), :, :] = saved_out_num_bases
+
+                assert self.out_num_w1.size(1) == saved_out_num_w1.size(1)
+                assert self.out_num_w1.size(2) == saved_out_num_w1.size(2)
+                self.out_num_w1[:saved_out_num_w1.size(0), :, :] = saved_out_num_w1
+
+                assert self.out_num_bias1.size(1) == saved_out_num_bias1.size(1)
+                self.out_num_bias1[:saved_out_num_bias1.size(0), :] = saved_out_num_bias1
+
+            assert self.attr_W.size(0) == saved_attr_W.size(0)
+            self.attr_W[:, :saved_attr_W.size(1)] = saved_attr_W
+
+            assert self.cat_feat_W.size(0) == saved_cat_feat_W.size(0)
+            assert self.cat_feat_W.size(2) == saved_cat_feat_W.size(2)
+            self.cat_feat_W[:, :saved_cat_feat_W.size(1), :] = saved_cat_feat_W
+
+        logging.info("%s: done loading embedding from previous run", type(self).__name__)
+
+    def gen_predictions(self, n_val_limit, include_std=False):
+        """
+        dump_predictions version for kamino
+        """
+        preds = self.predict_pp_batch(df=None, n_val_limit=n_val_limit, include_std=include_std)
+
+        for ((vid, is_cat, pred), row) in zip(preds, self.domain_recs):
+            assert vid == row['_vid_']
+
+            if is_cat:
+                # Include every domain value and their predicted probabilities
+                for val, proba in pred:
+                    yield {'tid': row['_tid_'],
+                                    'vid': vid,
+                                    'attribute': row['attribute'],
+                                    'inferred_val': val,
+                                    'proba': proba}
+
+            else:
+                yield {'tid': row['_tid_'],
+                                'vid': vid,
+                                'attribute': row['attribute'],
+                                'inferred_val': pred,
+                                'proba': -1}
+
+    def dump_predictions_hm(self, n_val_limit, include_std=False, fpath=None):
+        """
+        Dump inference results file in fpath for HoloMake.
+        Returns the dataframe of results.
+        """
+        preds = self.predict_pp_batch(df=None, n_val_limit=n_val_limit, include_std=include_std)
+
+        logging.info('%s: constructing and dumping predictions...', type(self).__name__)
+
+        results = []
+
+        for ((vid, is_cat, pred), row) in zip(preds, self.domain_recs):
+            assert vid == row['_vid_']
+
+            if is_cat:
+                # Include every domain value and their predicted probabilities
+                for val, proba in pred:
+                    results.append({'tid': row['_tid_'],
+                           'vid': vid,
+                           'attribute': row['attribute'],
+                           'inferred_val': val,
+                           'proba': proba})
+
+            else:
+                results.append({'tid': row['_tid_'],
+                       'vid': vid,
+                       'attribute': row['attribute'],
+                       'inferred_val': pred,
+                       'proba': -1})
+
+        with open(fpath, 'wb') as output:
+            pickle.dump(results, output, pickle.HIGHEST_PROTOCOL)
+
+        logging.info('%s: dumping predictions to %s', type(self).__name__, fpath)
+
+        return results
+

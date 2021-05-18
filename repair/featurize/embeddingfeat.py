@@ -1,16 +1,12 @@
 import logging
-import os
 import numpy as np
-import pandas as pd
-import sys
 
 import torch
-from torch.nn import Softmax
 from torch.nn import functional as F
 
 from .featurizer import Featurizer
-from dataset import AuxTables
-from domain.estimators import TupleEmbedding
+from holoclean.dataset import AuxTables
+from holoclean.domain.estimators import TupleEmbedding
 
 
 class EmbeddingFeaturizer(Featurizer):
@@ -47,6 +43,7 @@ class EmbeddingFeaturizer(Featurizer):
             validate_attr_col = self.addn_kwargs.get('validate_attr_col', 'attribute')
             validate_val_col = self.addn_kwargs.get('validate_val_col', 'correct_val')
             validate_epoch = self.addn_kwargs.get('validate_epoch', 1)
+            reuse_embedding = self.addn_kwargs.get('reuse_embedding', False)
 
             logging.debug('%s: training with %d epochs and %d batch size',
                           self.name,
@@ -55,19 +52,21 @@ class EmbeddingFeaturizer(Featurizer):
 
             domain_df = self.ds.aux_table[AuxTables.cell_domain].df.sort_values('_vid_')
             self.embedding_model = TupleEmbedding(self.env, self.ds, domain_df,
-                    numerical_attr_groups=numerical_attr_groups,
-                    dropout_pct=dropout_pct,
-                    learning_rate=learning_rate,
-                    validate_fpath=validate_fpath,
-                    validate_tid_col=validate_tid_col,
-                    validate_attr_col=validate_attr_col,
-                    validate_val_col=validate_val_col,
-                    validate_epoch=validate_epoch)
+                                                  numerical_attr_groups=numerical_attr_groups,
+                                                  dropout_pct=dropout_pct,
+                                                  learning_rate=learning_rate,
+                                                  validate_fpath=validate_fpath,
+                                                  validate_tid_col=validate_tid_col,
+                                                  validate_attr_col=validate_attr_col,
+                                                  validate_val_col=validate_val_col,
+                                                  validate_epoch=validate_epoch,
+                                                  reuse_embedding=reuse_embedding
+                                                  )
 
             dump_prefix = self.addn_kwargs.get('dump_prefix', None)
             if dump_prefix is None \
                     or not self.embedding_model.load_model(dump_prefix):
-                self.embedding_model.train(epochs, batch_size, weight_entropy_lambda=weight_lambda)
+                self.embedding_model.train(batch_size, weight_entropy_lambda=weight_lambda)
 
                 if dump_prefix is not None:
                     self.embedding_model.dump_model(dump_prefix)

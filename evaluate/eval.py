@@ -6,9 +6,8 @@ import time
 
 import pandas as pd
 
-from dataset import AuxTables
-from dataset.table import Table, Source
-from utils import NULL_REPR
+from holoclean.dataset import AuxTables
+from holoclean.dataset.table import Table, Source
 
 report_name_list = ['precision', 'recall', 'repair_recall',
                     'f1', 'repair_f1', 'detected_errors', 'total_errors', 'correct_repairs', 'total_repairs',
